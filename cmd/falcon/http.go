@@ -14,8 +14,8 @@ import (
 	"sync"
 	"syscall"
 
+	pb "github.com/cheggaaa/pb/v3"
 	"github.com/fatih/color"
-	pb "gopkg.in/cheggaaa/pb.v1"
 )
 
 var (
@@ -135,7 +135,7 @@ func (d HttpDownloader) initProgressbars() []*pb.ProgressBar {
 		if runtime.GOOS != "windows" {
 			prefix = color.YellowString(prefix)
 		}
-		newbar := pb.New64(part.RangeTo - part.RangeFrom).SetUnits(pb.U_BYTES).Prefix(prefix)
+		newbar := pb.New64(part.RangeTo-part.RangeFrom).Set(pb.Bytes, true).Set("prefix", prefix)
 		bars = append(bars, newbar)
 	}
 	return bars
@@ -215,7 +215,7 @@ func (d HttpDownloader) download() {
 			d.errorChan <- err
 			defer f.Close()
 
-			writer := io.MultiWriter(f, bar)
+			writer := bars[i].NewProxyWriter(f)
 			current := int64(0)
 			for {
 				select {

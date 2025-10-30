@@ -7,8 +7,8 @@ import (
 	"runtime"
 	"sort"
 
+	pb "github.com/cheggaaa/pb/v3"
 	"github.com/fatih/color"
-	pb "gopkg.in/cheggaaa/pb.v1"
 )
 
 func isJoinable(files []string) bool {
@@ -34,7 +34,7 @@ func JoinFile(files []string, out string) error {
 		prefix = color.GreenString(prefix)
 	}
 
-	bar = pb.StartNew(len(files)).Prefix(prefix)
+	bar = pb.StartNew(len(files)).Set("prefix", prefix)
 
 	outf, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
