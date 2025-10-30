@@ -2,8 +2,8 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
 	"log"
+	"os"
 	"path/filepath"
 	"runtime"
 
@@ -66,7 +66,7 @@ func resume(task string, conn int) {
 }
 
 func listTasks() {
-	files, err := ioutil.ReadDir(filepath.Join(GetUserHome(), appHome))
+	files, err := os.ReadDir(filepath.Join(GetUserHome(), appHome))
 
 	if err != nil {
 		log.Fatal(err)
