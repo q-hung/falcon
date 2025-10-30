@@ -8,10 +8,10 @@ Resumable download accelerator written in Golang
 
 # Installation
 
-Install dependencies with [dep](https://github.com/golang/dep#setup)
+Install dependencies with Go Modules (Go 1.11+ is required)
 
 ```
-dep ensure
+go mod tidy
 ```
 
 Manual build

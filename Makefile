@@ -34,3 +34,6 @@ uninstall:
 	@printf "\e[33mRemoving\e[90m %s\e[0m\n" $(OUT)
 	sudo rm -f /usr/local/bin/$(OUT)
 	@printf "\e[34mDone!\e[0m\n"
+
+modtidy:
+	go mod tidy
