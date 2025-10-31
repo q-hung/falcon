@@ -26,6 +26,7 @@ var (
 var (
 	acceptRangeHeader   = "Accept-Ranges"
 	contentLengthHeader = "Content-Length"
+	userAgent           = "falcon-downloader/1.0 (+https://github.com/q-hung/falcon)"
 )
 
 /*
@@ -121,6 +122,9 @@ func (d HttpDownloader) getHeader(url string) *http.Header {
 	req, err := http.NewRequest("GET", url, nil)
 	HandleError(err)
 
+	// Set User-Agent to respect server policies
+	req.Header.Set("User-Agent", userAgent)
+
 	resp, err := client.Do(req)
 	HandleError(err)
 
@@ -204,6 +208,8 @@ func (d HttpDownloader) download() {
 			req, err := http.NewRequest("GET", part.URL, nil)
 			d.errorChan <- err
 
+			// Set User-Agent to respect server policies
+			req.Header.Set("User-Agent", userAgent)
 			req.Header.Add("Range", ranges)
 			resp, err := client.Do(req)
 			d.errorChan <- err
