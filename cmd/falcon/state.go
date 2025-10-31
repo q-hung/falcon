@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 )
@@ -32,14 +31,14 @@ func (s *State) Save() error {
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile(filepath.Join(folder, stateFileName), j, 0644)
+	return os.WriteFile(filepath.Join(folder, stateFileName), j, 0644)
 }
 
 // LoadState state.json from unfinished stask folder
 func LoadState(task string) (*State, error) {
 	file := filepath.Join(GetUserHome(), appHome, task, stateFileName)
 	fmt.Printf("Getting data from %s\n", file)
-	bytes, err := ioutil.ReadFile(file)
+	bytes, err := os.ReadFile(file)
 	if err != nil {
 		return nil, err
 	}
