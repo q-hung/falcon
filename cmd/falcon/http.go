@@ -139,7 +139,8 @@ func (d HttpDownloader) initProgressbars() []*pb.ProgressBar {
 		if runtime.GOOS != "windows" {
 			prefix = color.YellowString(prefix)
 		}
-		newbar := pb.New64(part.RangeTo-part.RangeFrom).Set(pb.Bytes, true).Set("prefix", prefix)
+		// Progress bar size: inclusive range, so +1
+		newbar := pb.New64(part.RangeTo-part.RangeFrom+1).Set(pb.Bytes, true).Set("prefix", prefix)
 		bars = append(bars, newbar)
 	}
 	return bars
@@ -201,8 +202,6 @@ func (d HttpDownloader) download() {
 		ws.Add(1)
 		go func(i int64, part Part) {
 			defer ws.Done()
-			// send file path to file channel
-			d.fileChan <- part.Path
 			// get response for current part
 			ranges := fmt.Sprintf("bytes=%d-%d", part.RangeFrom, part.RangeTo)
 			req, err := http.NewRequest("GET", part.URL, nil)
@@ -216,26 +215,63 @@ func (d HttpDownloader) download() {
 			defer resp.Body.Close()
 
 			bar := bars[i]
+
+			// Check if file exists to determine if this is a resume
+			_, fileExists := os.Stat(part.Path)
+			fileMode := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+			if fileExists == nil {
+				// File exists, resume download by appending
+				fileMode = os.O_CREATE | os.O_WRONLY | os.O_APPEND
+			}
+
 			// open part.path for writing
-			f, err := os.OpenFile(part.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+			f, err := os.OpenFile(part.Path, fileMode, 0600)
 			d.errorChan <- err
 			defer f.Close()
 
 			writer := bars[i].NewProxyWriter(f)
-			current := int64(0)
-			for {
-				select {
-				case <-d.signalChan:
-					d.stateChan <- Part{URL: d.url, Path: part.Path, RangeFrom: current + part.RangeFrom, RangeTo: part.RangeTo}
+
+			// Expected bytes for this part (HTTP ranges are inclusive, so +1)
+			expectedBytes := part.RangeTo - part.RangeFrom + 1
+
+			// Use io.Copy to copy ALL data until EOF - this is more reliable than io.CopyN in a loop
+			// We handle interrupts separately
+			done := make(chan int64, 1)
+			errChan := make(chan error, 1)
+
+			go func() {
+				copied, err := io.Copy(writer, resp.Body)
+				if err != nil {
+					errChan <- err
 					return
-				default:
-					written, err := io.CopyN(writer, resp.Body, 100)
-					current += written
-					if err != nil {
-						bar.Finish()
-						return
-					}
 				}
+				done <- copied
+			}()
+
+			var copied int64
+			select {
+			case <-d.signalChan:
+				// Get file size for resume state
+				if fileInfo, err := os.Stat(part.Path); err == nil {
+					copied = fileInfo.Size()
+				}
+				d.stateChan <- Part{URL: d.url, Path: part.Path, RangeFrom: copied + part.RangeFrom, RangeTo: part.RangeTo}
+				return
+			case err := <-errChan:
+				bar.Finish()
+				d.errorChan <- err
+				return
+			case copied = <-done:
+				// Verify we got the expected amount of data
+				if copied != expectedBytes {
+					bar.Finish()
+					d.errorChan <- fmt.Errorf("part %d: expected %d bytes, got %d bytes", i, expectedBytes, copied)
+					return
+				}
+				bar.Finish()
+				// send file path to file channel after successful download
+				d.fileChan <- part.Path
+				return
 			}
 		}(int64(i), p)
 	} //end for

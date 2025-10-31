@@ -20,10 +20,14 @@ func calculateParts(connections int64, length int64, url string) []Part {
 	parts := make([]Part, 0)
 	for i := int64(0); i < connections; i++ {
 		fromBytes := (length / connections) * i
-		toBytes := length
-
+		var toBytes int64
+		
 		if i < connections-1 {
+			// For non-last parts: calculate end byte
 			toBytes = ((length / connections) * (i + 1)) - 1
+		} else {
+			// For the last part: end at the last byte (length - 1, since HTTP ranges are 0-indexed)
+			toBytes = length - 1
 		}
 
 		file := FilenameFromURL(url)

@@ -4,8 +4,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
+	"strings"
 
 	pb "github.com/cheggaaa/pb/v3"
 	"github.com/fatih/color"
@@ -24,8 +27,32 @@ func isJoinable(files []string) bool {
 
 // JoinFile combine a list of files into single file
 func JoinFile(files []string, out string) error {
-	//Sort with file name or we will join files with wrong order
-	sort.Strings(files)
+	// Sort files by part number (numeric order, not string order)
+	// This handles cases like part0, part1, part10, part2 correctly
+	sort.Slice(files, func(i, j int) bool {
+		// Extract part number from filename (e.g., "file.part10" -> 10)
+		baseI := filepath.Base(files[i])
+		baseJ := filepath.Base(files[j])
+
+		// Find the part number
+		partsI := strings.Split(baseI, ".part")
+		partsJ := strings.Split(baseJ, ".part")
+
+		if len(partsI) < 2 || len(partsJ) < 2 {
+			// Fallback to string comparison if format is unexpected
+			return files[i] < files[j]
+		}
+
+		numI, errI := strconv.Atoi(partsI[len(partsI)-1])
+		numJ, errJ := strconv.Atoi(partsJ[len(partsJ)-1])
+
+		if errI != nil || errJ != nil {
+			// Fallback to string comparison if parsing fails
+			return files[i] < files[j]
+		}
+
+		return numI < numJ
+	})
 	fmt.Println("Start joining")
 	var bar *pb.ProgressBar
 	prefix := "Joining"
