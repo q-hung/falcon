@@ -53,6 +53,7 @@ func isTextResponse(resp *http.Response) bool {
 
 func printResponseBody(resp *http.Response) {
 	if resp == nil || resp.Body == nil {
+		fmt.Printf("Server message: empty body\n")
 		return
 	}
 	defer resp.Body.Close()
@@ -169,24 +170,6 @@ func (d HttpDownloader) printHostInfo(url string) {
 
 	ipstr := FilterIPV4(ips)
 	fmt.Printf("Resolve ip: %s\n", strings.Join(ipstr, " | "))
-}
-
-func (d HttpDownloader) getHeader(url string) *http.Header {
-	if !IsValidURL(url) {
-		fmt.Printf("Invalid url\n")
-		os.Exit(1)
-	}
-
-	req, err := http.NewRequest("GET", url, nil)
-	HandleError(err)
-
-	// Set User-Agent to respect server policies
-	req.Header.Set("User-Agent", userAgent)
-
-	resp, err := client.Do(req)
-	HandleError(err)
-
-	return &resp.Header
 }
 
 func (d HttpDownloader) initProgressbars() []*pb.ProgressBar {
