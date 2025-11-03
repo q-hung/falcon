@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	neturl "net/url"
 	"os"
@@ -14,7 +13,7 @@ import (
 	"strings"
 )
 
-//HandleError handle fatal error
+// HandleError handle fatal error
 func HandleError(err error) {
 	if err != nil {
 		err := fmt.Errorf("%v", err)
@@ -26,18 +25,18 @@ func HandleError(err error) {
 func GetUserHome() string {
 	usr, err := user.Current()
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 	return usr.HomeDir
 }
 
-//IsValidURL Check if given string is valid url
+// IsValidURL Check if given string is valid url
 func IsValidURL(s string) bool {
 	_, err := neturl.ParseRequestURI(s)
 	return err == nil
 }
 
-//CreateFolderIfNotExist Create new directory if it doesn't exist
+// CreateFolderIfNotExist Create new directory if it doesn't exist
 func CreateFolderIfNotExist(folder string) error {
 	if _, err := os.Stat(folder); err != nil {
 		if err = os.MkdirAll(folder, 0755); err != nil {
@@ -97,7 +96,7 @@ func GetValidFolderPath(url string) string {
 
 	if strings.Contains(relative, "..") {
 		HandleError(errors.New("you may be a victim of directory traversal path attack"))
-		return "" //return is redundant because in fatal check we have panic, but compiler does not able to check
+		return ""
 	}
 
 	return fullQualifyPath

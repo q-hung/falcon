@@ -46,23 +46,81 @@ type HttpDownloader struct {
 	stateChan  chan Part
 }
 
+func isTextResponse(resp *http.Response) bool {
+	ct := resp.Header.Get("Content-Type")
+	return strings.HasPrefix(strings.ToLower(ct), "text/") || strings.Contains(strings.ToLower(ct), "json")
+}
+
+func printResponseBody(resp *http.Response) {
+	if resp == nil || resp.Body == nil {
+		return
+	}
+	defer resp.Body.Close()
+	if isTextResponse(resp) {
+		limited := io.LimitReader(resp.Body, 8192)
+		b, _ := io.ReadAll(limited)
+		if len(b) > 0 {
+			fmt.Printf("Server message: %s\n", string(b))
+		}
+	}
+}
+
+func probeRemote(u string) (*http.Response, error) {
+	req, err := http.NewRequest("HEAD", u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", userAgent)
+
+	resp, err := client.Do(req)
+	if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return resp, nil
+	}
+	if resp != nil {
+		// print any text from HEAD response if provided
+		printResponseBody(resp)
+	}
+	// Fallback for servers that don't support HEAD reliably: GET first byte
+	req2, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req2.Header.Set("User-Agent", userAgent)
+	req2.Header.Set("Range", "bytes=0-0")
+	resp2, err := client.Do(req2)
+	if err != nil {
+		return nil, err
+	}
+	if resp2.StatusCode == http.StatusPartialContent || (resp2.StatusCode >= 200 && resp2.StatusCode < 300) {
+		return resp2, nil
+	}
+	// print server text message then return error
+	printResponseBody(resp2)
+	return nil, fmt.Errorf("remote unavailable: %d %s", resp2.StatusCode, resp2.Status)
+}
+
 // NewHttpDownloader constructor
 func NewHttpDownloader(url string, connections int64, parts []Part) *HttpDownloader {
 	downloader := new(HttpDownloader)
-	header := downloader.getHeader(url)
+	// Probe remote to ensure it exists and to obtain headers (and final URL semantics)
+	resp, err := probeRemote(url)
+	HandleError(err)
+	defer resp.Body.Close()
+
 	var resumable = true
 	//print out host info
 	downloader.printHostInfo(url)
 
 	// CheckHTTPHeader Check if target url response
 	// contains Accept-Ranges or Content-Length headers
-	contentLength := header.Get(contentLengthHeader)
-	acceptRange := header.Get(acceptRangeHeader)
+	contentLength := resp.Header.Get(contentLengthHeader)
+	acceptRange := resp.Header.Get(acceptRangeHeader)
 
 	if contentLength == "" {
 		fmt.Printf("Response header doesn't contain Content-Length, fallback to 1 connection\n")
 		contentLength = "1" //set 1 because of progress bar not accept 0 length
 		connections = 1
+		resumable = false
 	}
 
 	if acceptRange == "" {
@@ -176,6 +234,14 @@ func (d HttpDownloader) downloadPart(i int64, part Part, bar *pb.ProgressBar, wg
 	d.errorChan <- err
 	resp, err := client.Do(req)
 	d.errorChan <- err
+	if err != nil {
+		return
+	}
+	// If non-2xx here, print any server message and abort this part
+	if !(resp.StatusCode >= 200 && resp.StatusCode < 300) && resp.StatusCode != http.StatusPartialContent {
+		printResponseBody(resp)
+		return
+	}
 	defer resp.Body.Close()
 
 	f, err := d.openPartFile(part)
