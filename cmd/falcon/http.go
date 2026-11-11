@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -11,17 +12,13 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 
 	pb "github.com/cheggaaa/pb/v3"
 	"github.com/fatih/color"
 )
 
-var (
-	client http.Client
-	err    error
-)
+var client http.Client
 
 var (
 	acceptRangeHeader   = "Accept-Ranges"
@@ -39,11 +36,18 @@ type HttpDownloader struct {
 	length     int64
 	parts      []Part
 	resumable  bool
-	fileChan   chan string
-	doneChan   chan bool
-	errorChan  chan error
-	signalChan chan os.Signal
-	stateChan  chan Part
+	// ctx is cancelled on SIGHUP/SIGINT/SIGTERM/SIGQUIT (or on the first part
+	// error), so every part worker sees it, unlike a single-value signal channel.
+	ctx  context.Context
+	stop context.CancelFunc
+}
+
+// partResult is what each part worker reports. state is the part's resume
+// state; RangeFrom > RangeTo means the part is fully downloaded.
+type partResult struct {
+	state    Part
+	finished bool
+	err      error
 }
 
 func isTextResponse(resp *http.Response) bool {
@@ -147,13 +151,7 @@ func NewHttpDownloader(url string, connections int64, parts []Part) *HttpDownloa
 		downloader.parts = parts
 	}
 
-	downloader.fileChan = make(chan string, int64(connections))
-	downloader.doneChan = make(chan bool, int64(connections))
-	downloader.errorChan = make(chan error, 1)
-	downloader.stateChan = make(chan Part, 1)
-	downloader.signalChan = make(chan os.Signal, 1)
-
-	signal.Notify(downloader.signalChan,
+	downloader.ctx, downloader.stop = signal.NotifyContext(context.Background(),
 		syscall.SIGHUP,
 		syscall.SIGINT,
 		syscall.SIGTERM,
@@ -181,7 +179,7 @@ func (d HttpDownloader) initProgressbars() []*pb.ProgressBar {
 			prefix = color.YellowString(prefix)
 		}
 		// Progress bar size: inclusive range, so +1
-		newbar := pb.New64(part.RangeTo-part.RangeFrom+1).Set(pb.Bytes, true).Set("prefix", prefix)
+		newbar := pb.New64(max(expectedBytes(part), 1)).Set(pb.Bytes, true).Set("prefix", prefix)
 		bars = append(bars, newbar)
 	}
 	return bars
@@ -189,7 +187,7 @@ func (d HttpDownloader) initProgressbars() []*pb.ProgressBar {
 
 func (d HttpDownloader) newRangeRequest(part Part) (*http.Request, error) {
 	ranges := fmt.Sprintf("bytes=%d-%d", part.RangeFrom, part.RangeTo)
-	req, err := http.NewRequest("GET", part.URL, nil)
+	req, err := http.NewRequestWithContext(d.ctx, "GET", part.URL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -269,62 +267,116 @@ func (d HttpDownloader) downloadPart(i int64, part Part, bar *pb.ProgressBar, wg
 	}
 }
 
-// Start downloading proccess
-func (d HttpDownloader) Start() {
-	var (
-		files      = make([]string, 0)
-		parts      = make([]Part, 0)
-		interupted = false
-		filename   = FilenameFromURL(d.url)
-	)
-
-	go d.download()
-
-	for {
-		select {
-		case file := <-d.fileChan:
-			files = append(files, file)
-		case err := <-d.errorChan:
-			HandleError(err)
-		case part := <-d.stateChan:
-			parts = append(parts, part)
-			interupted = true
-		case <-d.doneChan:
-			if interupted && d.resumable {
-				fmt.Printf("Interrupted, saving state ... \n")
-				s := &State{URL: d.url, Parts: parts}
-				err = s.Save()
-				HandleError(err)
-				return
-			}
-			// Check and join all parts
-			if isJoinable(files) {
-				err = JoinFile(files, filename)
-				HandleError(err)
-			} else {
-				fmt.Println("Source file is empty, no need to join")
-			}
-			err = os.RemoveAll(GetValidFolderPath(d.url))
-			HandleError(err)
-			return
-		}
+func (d HttpDownloader) downloadPart(i int64, part Part, bar *pb.ProgressBar) partResult {
+	defer bar.Finish()
+	expected := expectedBytes(part)
+	if expected <= 0 { // finished in a previous run
+		return partResult{state: part, finished: true}
 	}
+
+	// interrupted: part.RangeFrom advances by the bytes written in this run
+	// only (counted by io.Copy, not stat'ed), so the resume offset is exact.
+	interrupted := func(copied int64) partResult {
+		part.RangeFrom += copied
+		return partResult{state: part}
+	}
+
+	req, err := d.newRangeRequest(part)
+	if err != nil {
+		return partResult{err: err}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		if d.ctx.Err() != nil {
+			return interrupted(0)
+		}
+		return partResult{err: err}
+	}
+	defer resp.Body.Close()
+	if !(resp.StatusCode >= 200 && resp.StatusCode < 300) && resp.StatusCode != http.StatusPartialContent {
+		printResponseBody(resp)
+		return partResult{err: fmt.Errorf("part %d: unexpected status %s", i, resp.Status)}
+	}
+
+	f, err := d.openPartFile(part)
+	if err != nil {
+		return partResult{err: err}
+	}
+	defer f.Close()
+
+	// Copy on this goroutine: cancelling ctx aborts the body read, and we only
+	// look at the byte count once no write is in flight.
+	copied, err := io.Copy(bar.NewProxyWriter(f), resp.Body)
+	if err == nil && copied == expected {
+		part.RangeFrom = part.RangeTo + 1
+		return partResult{state: part, finished: true}
+	}
+	if d.ctx.Err() != nil {
+		return interrupted(copied)
+	}
+	if err != nil {
+		return partResult{err: err}
+	}
+	return partResult{err: fmt.Errorf("part %d: expected %d bytes, got %d bytes", i, expected, copied)}
 }
 
-func (d HttpDownloader) download() {
-	var (
-		ws      sync.WaitGroup
-		barPool *pb.Pool
-	)
+// Start downloading proccess
+func (d HttpDownloader) Start() {
+	defer d.stop()
 	bars := d.initProgressbars()
-	barPool, err = pb.StartPool(bars...)
-	d.errorChan <- err
-	defer barPool.Stop()
+	barPool, err := pb.StartPool(bars...)
+	HandleError(err)
 
+	// Buffered for every part, so workers never block and Start reads exactly
+	// len(parts) results: there is no separate "done" signal to race with.
+	results := make(chan partResult, len(d.parts))
 	for i, p := range d.parts {
-		ws.Add(1)
-		go d.downloadPart(int64(i), p, bars[i], &ws)
-	} //end for
-	ws.Wait()
-	d.doneChan <- true
+		go func(i int, p Part) {
+			r := d.downloadPart(int64(i), p, bars[i])
+			if r.err != nil {
+				d.stop() // abort the sibling parts
+			}
+			results <- r
+		}(i, p)
+	}
+
+	var (
+		files    = make([]string, 0, len(d.parts))
+		parts    = make([]Part, 0, len(d.parts))
+		firstErr error
+	)
+	for range d.parts {
+		r := <-results
+		switch {
+		case r.err != nil:
+			if firstErr == nil {
+				firstErr = r.err
+			}
+		case r.finished:
+			files = append(files, r.state.Path)
+			parts = append(parts, r.state)
+		default:
+			parts = append(parts, r.state)
+		}
+	}
+	barPool.Stop()
+	HandleError(firstErr)
+
+	if len(files) < len(d.parts) { // interrupted
+		if !d.resumable {
+			fmt.Println("Interrupted, download is not resumable")
+			return
+		}
+		fmt.Printf("Interrupted, saving state ... \n")
+		HandleError((&State{URL: d.url, Parts: parts}).Save())
+		return
+	}
+
+	// Check and join all parts
+	if isJoinable(files) {
+		HandleError(JoinFile(files, FilenameFromURL(d.url)))
+	} else {
+		fmt.Println("Source file is empty, no need to join")
+	}
+	HandleError(os.RemoveAll(GetValidFolderPath(d.url)))
 }
